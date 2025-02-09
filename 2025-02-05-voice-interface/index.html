@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Nerd Show and Tell 2024-02-05: OpenAI Whisper STT Demo</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      margin: 2rem;
+      background: #f9f9f9;
+    }
+    label, button, input {
+      font-size: 1rem;
+      margin: 0.5rem 0;
+      display: inline-block;
+    }
+    input[type="password"] {
+      padding: 0.4rem;
+      width: 300px;
+    }
+    #controls {
+      margin-bottom: 1rem;
+    }
+    #toggleBtn {
+      margin-right: 0.5rem;
+      padding: 0.5rem 1rem;
+      font-size: 1rem;
+    }
+    #copyAllBtn {
+      margin-left: 0.5rem;
+      padding: 0.5rem 1rem;
+      font-size: 1rem;
+    }
+    #recordingTimer {
+      font-size: 1rem;
+      margin-left: 0.75rem;
+      color: #333;
+    }
+    #autoCopyCheckbox {
+      margin-left: 1rem;
+    }
+    #transcripts {
+      background: #fff;
+      border: 1px solid #ccc;
+      padding: 1rem;
+      min-height: 4rem;
+      margin-top: 1rem;
+    }
+    .transcript-entry {
+      position: relative;
+      background: #eee;
+      margin: 0.5rem 0;
+      padding: 0.5rem;
+      border-left: 4px solid #bbb;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+    }
+    .transcript-text {
+      white-space: pre-wrap;
+      flex: 1 1 auto;
+      margin-right: 1rem;
+    }
+    .entry-buttons {
+      display: flex;
+      gap: 0.5rem;
+      flex: 0 0 auto;
+    }
+    .copyBtn, .retryBtn {
+      padding: 0.3rem 0.6rem;
+      cursor: pointer;
+    }
+    .spinner {
+      margin-left: 0.5rem;
+    }
+    .error {
+      color: red;
+      margin-top: 1rem;
+    }
+    .hidden {
+      display: none;
+    }
+  </style>
+</head>
+<body>
+
+<h1>Nerd Show and Tell 2024-02-05: OpenAI Whisper STT Demo</h1>
+<p>
+  Intended to be demoed at
+  <a href="https://www.meetup.com/ai-innovator-circle/events/305576055/?recId=043936a1-c01b-4cde-a532-cdc699f73ff7&recSource=keyword_search&searchId=013a011f-ffd1-4349-8f14-a230be2d642c&eventOrigin=find_page$all">
+    Nerd Show and Tell
+  </a>.
+  A minimum viable proof of concept to build a tool to help with my already existing
+  natural language writing workflows.
+</p>
+
+<div id="controls">
+  <label for="openaiKey"><strong>OpenAI API Key:</strong></label>
+  <input
+    type="password"
+    id="openaiKey"
+    placeholder="Enter your API key (sk-...)"
+  />
+
+  <br><br>
+
+  <button id="toggleBtn">Start Recording</button>
+  <span id="recordingTimer">00:00</span>
+  <input type="checkbox" id="autoCopyCheckbox" checked>
+  <label for="autoCopyCheckbox">
+    Automatically copy all transcripts after each result
+  </label>
+
+  <button id="copyAllBtn">Copy All</button>
+</div>
+
+<div id="transcripts">
+  <p><em>Your transcriptions will appear below...</em></p>
+</div>
+
+<div class="error hidden" id="errorDisplay"></div>
+
+<script>
+  const transcriptsList = [];
+  const openaiKeyInput   = document.getElementById('openaiKey');
+  const toggleBtn        = document.getElementById('toggleBtn');
+  const copyAllBtn       = document.getElementById('copyAllBtn');
+  const recordingTimer   = document.getElementById('recordingTimer');
+  const transcriptsDiv   = document.getElementById('transcripts');
+  const errorDisplay     = document.getElementById('errorDisplay');
+  const autoCopyCheckbox = document.getElementById('autoCopyCheckbox');
+
+  let audioStream   = null;
+  let mediaRecorder = null;
+  let audioChunks   = [];
+  let timerInterval = null;
+  let startTime     = null;
+  let isRecording   = false;
+
+  window.addEventListener('beforeunload', (event) => {
+    const hasPending = transcriptsList.some(t => t.status === 'pending');
+    if (hasPending) {
+      event.preventDefault();
+      event.returnValue = 'You have pending transcriptions. Are you sure you want to leave?';
+    }
+  });
+
+  document.addEventListener('keydown', (e) => {
+    const tag = e.target.tagName.toLowerCase();
+    if (tag === 'input' || tag === 'textarea' || tag === 'select') return;
+    if (e.code === 'Space') {
+      e.preventDefault();
+      toggleRecording();
+    }
+  });
+
+  toggleBtn.addEventListener('click', () => {
+    toggleRecording();
+  });
+
+  copyAllBtn.addEventListener('click', () => {
+    copyAllTranscripts();
+  });
+
+  function toggleRecording() {
+    resetError();
+    const apiKey = openaiKeyInput.value.trim();
+    if (!apiKey) {
+      showError('Please enter a valid OpenAI API key.');
+      return;
+    }
+
+    if (isRecording) {
+      stopRecording();
+    } else {
+      startRecordingProcess();
+    }
+  }
+
+  async function startRecordingProcess() {
+    try {
+      audioStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      beginRecording();
+    } catch (err) {
+      showError('Could not get microphone access: ' + err.message);
+    }
+  }
+
+  function beginRecording() {
+    audioChunks = [];
+    mediaRecorder = new MediaRecorder(audioStream);
+
+    mediaRecorder.ondataavailable = (evt) => {
+      if (evt.data.size > 0) audioChunks.push(evt.data);
+    };
+
+    mediaRecorder.onstop = handleRecordingStop;
+    mediaRecorder.start();
+    isRecording = true;
+    toggleBtn.textContent = 'Stop Recording';
+
+    startTime = Date.now();
+    updateTimer();
+    timerInterval = setInterval(updateTimer, 500);
+  }
+
+  function stopRecording() {
+    if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+      mediaRecorder.stop();
+    }
+    if (audioStream) {
+      audioStream.getTracks().forEach(track => track.stop());
+    }
+    isRecording = false;
+    toggleBtn.textContent = 'Start Recording';
+
+    clearInterval(timerInterval);
+    updateTimer(0);
+  }
+
+  async function handleRecordingStop() {
+    const apiKey = openaiKeyInput.value.trim();
+    if (!apiKey) {
+      showError('OpenAI API key missing when stopping?');
+      return;
+    }
+
+    const audioBlob = new Blob(audioChunks, { type: 'audio/webm' });
+    const entryIndex = transcriptsList.length;
+    const newEntry = {
+      blob: audioBlob,
+      text: 'Transcribing...',
+      status: 'pending',
+      element: null
+    };
+    transcriptsList.push(newEntry);
+
+    const uiElement = createTranscriptUI(entryIndex, newEntry.text, true);
+    newEntry.element = uiElement;
+    transcriptsDiv.appendChild(uiElement);
+
+    try {
+      const transcribedText = await sendAudioToOpenAI(audioBlob, apiKey);
+      newEntry.text = transcribedText;
+      newEntry.status = 'done';
+      updateTranscriptUI(entryIndex, transcribedText, false);
+
+      if (autoCopyCheckbox.checked) {
+        copyAllTranscripts();
+      }
+    } catch (err) {
+      newEntry.text = '[Error transcribing audio]';
+      newEntry.status = 'error';
+      updateTranscriptUI(entryIndex, newEntry.text, false, true);
+      showError(err.message || err.toString());
+    }
+  }
+
+  async function sendAudioToOpenAI(audioBlob, apiKey) {
+    const formData = new FormData();
+    const file = new File([audioBlob], 'audio.webm', { type: 'audio/webm' });
+    formData.append('file', file);
+    formData.append('model', 'whisper-1');
+
+    const response = await fetch('https://api.openai.com/v1/audio/transcriptions', {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${apiKey}` },
+      body: formData
+    });
+
+    if (!response.ok) {
+      const errText = await response.text();
+      throw new Error('OpenAI API error: ' + errText);
+    }
+
+    const result = await response.json();
+    return result.text || JSON.stringify(result, null, 2);
+  }
+
+  function createTranscriptUI(index, text, showSpinner = false, isError = false) {
+    const entryDiv = document.createElement('div');
+    entryDiv.className = 'transcript-entry';
+    entryDiv.dataset.index = index;
+
+    const textSpan = document.createElement('div');
+    textSpan.className = 'transcript-text';
+    textSpan.textContent = text;
+
+    if (showSpinner) {
+      const spinner = document.createElement('span');
+      spinner.className = 'spinner';
+      spinner.textContent = '⏳';
+      textSpan.appendChild(spinner);
+    }
+
+    const buttonsDiv = document.createElement('div');
+    buttonsDiv.className = 'entry-buttons';
+
+    const copyButton = document.createElement('button');
+    copyButton.textContent = 'Copy';
+    copyButton.className = 'copyBtn';
+    copyButton.addEventListener('click', () => {
+      const copyText = textSpan.textContent.replace('⏳', '').trim();
+      navigator.clipboard.writeText(copyText);
+    });
+    buttonsDiv.appendChild(copyButton);
+
+    const retryButton = document.createElement('button');
+    retryButton.textContent = 'Retry';
+    retryButton.className = 'retryBtn hidden';
+    retryButton.addEventListener('click', () => {
+      retryTranscription(index);
+    });
+    buttonsDiv.appendChild(retryButton);
+
+    entryDiv.appendChild(textSpan);
+    entryDiv.appendChild(buttonsDiv);
+    return entryDiv;
+  }
+
+  function updateTranscriptUI(index, newText, showSpinner = false, isError = false) {
+    const entry = transcriptsList[index];
+    if (!entry || !entry.element) return;
+
+    const textSpan = entry.element.querySelector('.transcript-text');
+    textSpan.textContent = newText;
+
+    if (showSpinner) {
+      const spinner = document.createElement('span');
+      spinner.className = 'spinner';
+      spinner.textContent = '⏳';
+      textSpan.appendChild(spinner);
+    }
+
+    const retryBtn = entry.element.querySelector('.retryBtn');
+    if (isError) {
+      retryBtn.classList.remove('hidden');
+    } else {
+      retryBtn.classList.add('hidden');
+    }
+  }
+
+  async function retryTranscription(index) {
+    const apiKey = openaiKeyInput.value.trim();
+    if (!apiKey) {
+      showError('Cannot retry: missing API key.');
+      return;
+    }
+    const entry = transcriptsList[index];
+    if (!entry) return;
+
+    entry.status = 'pending';
+    entry.text = 'Transcribing...';
+    updateTranscriptUI(index, entry.text, true, false);
+
+    try {
+      const transcribedText = await sendAudioToOpenAI(entry.blob, apiKey);
+      entry.text = transcribedText;
+      entry.status = 'done';
+      updateTranscriptUI(index, transcribedText, false, false);
+
+      if (autoCopyCheckbox.checked) {
+        copyAllTranscripts();
+      }
+    } catch (err) {
+      entry.text = '[Error transcribing audio]';
+      entry.status = 'error';
+      updateTranscriptUI(index, entry.text, false, true);
+      showError(err.message || err.toString());
+    }
+  }
+
+  function copyAllTranscripts() {
+    const allTexts = transcriptsList
+      .map(e => e.text.replace('⏳','').trim())
+      .filter(t => t && !t.startsWith('Transcribing...'));
+    const combined = allTexts.join('\n\n');
+    if (!combined) return;
+
+    navigator.clipboard.writeText(combined).catch(err => showError(`Error copying all transcripts: ${err}`));
+  }
+
+  function updateTimer() {
+    if (!startTime) {
+      recordingTimer.textContent = '00:00';
+      return;
+    }
+    const elapsedMs = Date.now() - startTime;
+    const secs = Math.floor(elapsedMs / 1000);
+    const minutes = Math.floor(secs / 60);
+    const seconds = secs % 60;
+    const mm = String(minutes).padStart(2, '0');
+    const ss = String(seconds).padStart(2, '0');
+    recordingTimer.textContent = `${mm}:${ss}`;
+  }
+
+  function showError(msg) {
+    errorDisplay.textContent = msg;
+    errorDisplay.classList.remove('hidden');
+  }
+  function resetError() {
+    errorDisplay.textContent = '';
+    errorDisplay.classList.add('hidden');
+  }
+</script>
+</body>
+</html>
